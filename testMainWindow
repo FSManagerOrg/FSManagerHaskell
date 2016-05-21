@@ -1,19 +1,23 @@
 import Data.Char
 
+-- | Check command exist
 commandTest :: [String] -> String -> Bool
 commandTest x y = 
 	if (head(x) == y) then True else False
 
+-- | Check size of a String
 sizeTest :: [Char] -> Int -> Bool
 sizeTest x y =
 	if (((length x) <= y) && (x /= "")) then True else False
 
+-- | Check some requirements
 allCorrect :: [Char] -> Bool
 allCorrect x =
 	if x == "" then True else
 	if isLower(head x) then allCorrect (tail x) else
 	if isDigit(head x) then allCorrect (tail x) else False
 
+-- | Create group if is possible
 createGroup :: [String] -> IO Bool
 createGroup x =
 	(if (length(x) == 2) then 
@@ -33,6 +37,7 @@ createGroup x =
 		putStrLn $ "Error no name group"
 		return False)
 
+-- Main ------------------------------------------
 main = do
 	putStr "# "
 	command <- getLine
@@ -46,4 +51,4 @@ main = do
 	else do
 		putStrLn $ "Error"
 		main
-
+-- Main -------------------------------------------
