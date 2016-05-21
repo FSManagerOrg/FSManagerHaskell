@@ -1,0 +1,49 @@
+import Data.Char
+
+commandTest :: [String] -> String -> Bool
+commandTest x y = 
+	if (head(x) == y) then True else False
+
+sizeTest :: [Char] -> Int -> Bool
+sizeTest x y =
+	if (((length x) <= y) && (x /= "")) then True else False
+
+allCorrect :: [Char] -> Bool
+allCorrect x =
+	if x == "" then True else
+	if isLower(head x) then allCorrect (tail x) else
+	if isDigit(head x) then allCorrect (tail x) else False
+
+createGroup :: [String] -> IO Bool
+createGroup x =
+	(if (length(x) == 2) then 
+	(if (sizeTest (last x) 32)
+		then
+			(if (allCorrect (last x))
+				then do
+					putStrLn "Grupo creado"
+					return True
+				else do
+					putStrLn "Error creation group"
+					return False)
+		else do
+			putStrLn $ "Error size name group"
+			return False)
+	else do
+		putStrLn $ "Error no name group"
+		return False)
+
+main = do
+	putStr "# "
+	command <- getLine
+	if null command
+		then
+			main
+	else if (commandTest (words(command)) "groupadd")
+		then do
+			createGroup (words(command))
+			main
+	else do
+		putStrLn $ "Error"
+		main
+
