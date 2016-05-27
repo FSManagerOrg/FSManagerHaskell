@@ -10,8 +10,8 @@ data StorageDevice = StorageDevice { pathDev :: String
 
 data User = User { userName :: String
                      , userID :: Int
-                     , primaryGroup :: String
-                     , secundaryGroups :: [String]
+                     , primaryGroup :: Group
+                     , secundaryGroups :: [Group]
                      , homeDirectory :: String
                      } deriving (Show, Eq)
 
@@ -94,18 +94,15 @@ editGroup group user = Group {groupName=groupName(group),
 searchGroup :: String -> [Group] -> Group
 searchGroup groupToSearch groups =
 	if groupToSearch == groupName(groups!!0) then groups!!0 
-		else
-			searchGroup (groupToSearch) (tail groups)
+		else searchGroup (groupToSearch) (tail groups)
 
-makeListGroupsToUpdate :: User -> [Group] -> [Group]
-makeListGroupsToUpdate user groups = 
-	(makeListGroupsToUpdateAux ([primaryGroup(user)]) (groups) ([])) ++ (makeListGroupsToUpdateAux (secundaryGroups(user)) (groups) ([]))
-	
+searchGroups :: [String] -> [Group] -> [Group] -> [Group]
+searchGroups groupsToSearch groups answer =
+	if groupsToSearch == [] then answer 
+		else searchGroups (tail groupsToSearch) (groups) (answer++[searchGroup(groupsToSearch!!0)(groups)])
 
-makeListGroupsToUpdateAux :: [String] -> [Group] -> [Group] -> [Group]
-makeListGroupsToUpdateAux groupsToSearch groups answer =
-	if groupsToSearch == [] then answer
-		else makeListGroupsToUpdateAux (tail groupsToSearch) (groups) (answer++[searchGroup (groupsToSearch!!0) (groups)] )
+makeListGroupsToUpdate :: User -> [Group]
+makeListGroupsToUpdate user = []++[primaryGroup(user)]++secundaryGroups(user) 
 
 updateGroups :: User -> [Group] -> [Group] -> [Group]
 updateGroups user listUpdate groups =
@@ -123,11 +120,35 @@ updateGroupsAux user groupToUpdate groups answer =
 editDataMasterUser :: DataMaster -> User -> IO()
 editDataMasterUser dataMaster user = do
 	menu DataMaster {users=(getUsers dataMaster)++([user]), 
-										groups=(updateGroups (user) (makeListGroupsToUpdate (user) (getGroups(dataMaster))) (getGroups(dataMaster))), 
-										stgdevices=(getStgDev dataMaster),
-										filesys=(getFileSys dataMaster),
-										volgroup=(getVolGr dataMaster),
-										fileanddir=(getFileDir dataMaster)}
+					groups=(updateGroups (user) (makeListGroupsToUpdate (user)) (getGroups(dataMaster))), 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(getFileDir dataMaster)}
+
+editDataMasterUserDelete :: DataMaster -> String -> [User] -> IO()
+editDataMasterUserDelete dataMaster user users =
+	menu DataMaster {users=users, 
+					groups=updateGroupsDeleteUser (user) (getGroups dataMaster) ([]), 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(getFileDir dataMaster)}	
+
+updateGroupsDeleteUser :: String -> [Group] -> [Group] -> [Group]
+updateGroupsDeleteUser user groups answer =
+	if groups == [] then answer 
+	else 
+		updateGroupsDeleteUser (user) (tail groups) (answer++[Group {groupName=groupName(groups!!0), 
+								groupID=groupID(groups!!0),
+								associatedUsers=updateGroupsDeleteUserAux(user)(associatedUsers(groups!!0))([])}]) 
+
+updateGroupsDeleteUserAux :: String -> [User] -> [User] -> [User]
+updateGroupsDeleteUserAux name usersGroup answer =
+	if usersGroup == [] then answer else
+	if name == userName(usersGroup!!0) 
+		then updateGroupsDeleteUserAux (name) (tail usersGroup) (answer)
+		else updateGroupsDeleteUserAux (name) (tail usersGroup) (answer++[usersGroup!!0])
 
 -- | Create group if is possible
 createGroup :: [String] -> DataMaster -> IO()
@@ -161,7 +182,7 @@ addUser dataMaster command =
 	do
 		(editDataMasterUser (dataMaster) (User { userName=(last command)
 					                     , userID=(1000+length(getUsers(dataMaster)))
-					                     , primaryGroup=command!!2
+					                     , primaryGroup=searchGroup(command!!2)(getGroups(dataMaster))
 					                     , secundaryGroups=[]
 					                     , homeDirectory="/home/"++(last command)
 					                     }))
@@ -175,8 +196,8 @@ addUserWith2ndGroups dataMaster command =
 	do
 		(editDataMasterUser (dataMaster) (User { userName=(last command)
 					                     , userID=(1000+length(getUsers(dataMaster)))
-					                     , primaryGroup=command!!2
-					                     , secundaryGroups=getGroupName(command!!4)("")([])
+					                     , primaryGroup=searchGroup(command!!2)(getGroups(dataMaster))
+					                     , secundaryGroups=searchGroups(getGroupName(command!!4)("")([])) (getGroups(dataMaster)) ([])
 					                     , homeDirectory="/home/"++(last command)
 					                     }))
 		else do
@@ -235,7 +256,7 @@ createUser command dataMaster =
 
 printList :: [User] -> String -> String
 printList list str =
-	if list == [] then "vacio" else
+	if list == [] then str else
 	do
 		printList (tail list) (str++userName(list!!0)++", ")
 
@@ -246,12 +267,11 @@ printGroups groups dataMaster =
 		putStrLn(groupName(groups!!0)++"        "++show(groupID(groups!!0))++printList(associatedUsers(groups!!0))("     "))
 		printGroups (tail groups) (dataMaster)
 
-print2aryUserGroups :: [String] -> String -> String
+print2aryUserGroups :: [Group] -> String -> String
 print2aryUserGroups groups answer =
 	if groups == [] then answer 
 		else
-			print2aryUserGroups (tail groups) (answer++","++groups!!0)
-
+			print2aryUserGroups (tail groups) (answer++","++groupName(groups!!0))
 
 printUsers :: [User] -> DataMaster -> IO()
 printUsers users dataMaster =
@@ -259,7 +279,7 @@ printUsers users dataMaster =
 	do
 		putStrLn(userName(users!!0)++"      "++
 					show(userID(users!!0))++"     "++
-					primaryGroup(users!!0)++"     "++
+					groupName(primaryGroup(users!!0))++"     "++
 					print2aryUserGroups(secundaryGroups(users!!0))("")++"     "++
 					homeDirectory(users!!0) )
 		printUsers (tail users)(dataMaster)
@@ -294,8 +314,12 @@ userExist users name =
 findUser :: [User] -> String -> User
 findUser users name =
 	if userName(users!!0) == name then (users!!0) 
-		else
-			findUser (tail users) (name)
+		else findUser (tail users) (name)
+
+printFingerUserGroups :: [Group] -> String -> String
+printFingerUserGroups groups answer =
+	if groups == [] then answer 
+	else printFingerUserGroups (tail groups) (answer++groupName(groups!!0))
 
 printFinger :: User -> DataMaster ->IO()
 printFinger user dataMaster = 
@@ -303,9 +327,8 @@ printFinger user dataMaster =
 		putStrLn ("UserName: "++(userName(user)))
 		putStrLn ("UID: "++show(userID(user)))
 		putStrLn ("HomeDirectory: "++(homeDirectory(user)))
-		putStrLn ("Associated primary group: "++(primaryGroup(user)))
-		putStrLn ("Associated secondary groups: " )
-		mapM_ putStrLn (secundaryGroups(user))
+		putStrLn ("Associated primary group: "++groupName(primaryGroup(user)))
+		putStrLn ("Associated secondary groups: "++printFingerUserGroups(secundaryGroups(user))("") )
 		menu dataMaster 
 
 fingerUser :: [String] -> DataMaster -> IO()
@@ -322,32 +345,132 @@ fingerUser command dataMaster =
 				else(putStrLn "Error user not exist") ) 
 			else putStrLn "Error finger input"
 
-userDel :: [String] -> Bool
-userDel command =
-	if(length(command) == 1 || length(command) > 2) then False else
-	if(verifyUser(command!!1)) then True else False
+deleteUser :: String -> [User] -> [User] -> DataMaster -> IO()
+deleteUser name users answer dataMaster =
+	if users == [] 
+		then do
+			editDataMasterUserDelete (dataMaster) (name) (answer) 
+	else if name == userName(users!!0) 
+		then deleteUser(name)(tail users)(answer)(dataMaster) 
+		else deleteUser(name)(tail users)(answer++[users!!0])(dataMaster)
 
-groupDel :: [String] -> Bool
-groupDel command =
-	if(length(command) == 1 || length(command) > 2) then False else
-	if(verifyGroup(command!!1)) then True else False
+userDel :: [String] -> DataMaster -> IO()
+userDel command dataMaster =
+	if(length(command) == 1 || length(command) > 2) 
+		then do
+				putStrLn "Error input userdel"
+				menu dataMaster 
+		else if(verifyUser(command!!1)) 
+			then 
+				deleteUser (command!!1) (getUsers dataMaster) ([]) (dataMaster)
+			else do
+				putStrLn "Error input userdel"
+				menu dataMaster
 
--- FALTA TRATAR CON LA LISTA DE ENTRADA!!!!!!!!!
-modUser :: [String] -> String -> Bool
-modUser commandUser userParam =
-	if(commandUser == []) then True else
-	if(commandUser!!0 == "-g") then modUser (tail commandUser) userParam else
-	if(commandUser!!0 == "-G") then modUser (tail commandUser) userParam 
-	else False
+groupDelete :: String -> [Group] -> [Group] -> DataMaster -> IO()
+groupDelete group groups answer dataMaster =
+	if groups == [] 
+		then menu (DataMaster {users=(getUsers dataMaster), 
+					groups=answer, 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(getFileDir dataMaster)})
+		else
+			if group == groupName(groups!!0)
+				then groupDelete (group) (tail groups) (answer) dataMaster
+				else groupDelete (group) (tail groups) (answer++[groups!!0]) dataMaster
 
-userModification :: [String] -> Bool
-userModification command =
-	if(length(command) == 2) then True else
-	if(length(command) >= 4) 
-		then ( if(verifyUser(last command)) 
-			then( modUser(tail(init command)) (last command) ) 
-			else(False) )
-		else (False) 
+groupDel :: [String] -> DataMaster -> IO()
+groupDel command dataMaster =
+	if(length(command) == 1 || length(command) > 2) 
+		then do
+		 		putStrLn "Error input groupdel"
+		 		menu dataMaster
+		else if(verifyGroup(command!!1)) 
+			then 
+				groupDelete (command!!1) (getGroups dataMaster) ([]) (dataMaster) 
+			else do
+				putStrLn "Error input groupdel"
+		 		menu dataMaster
+
+modifyUser4params :: String -> String -> [String] -> [User] -> DataMaster -> [User] -> [User]
+modifyUser4params user primary secondary users dataMaster answer =
+	if users == [] then answer else
+	if user == userName(users!!0) 
+		then modifyUser4params (user) (primary) (secondary) (tail users) (dataMaster) (answer++[User { userName=userName(users!!0)
+													                     , userID=userID(users!!0)
+													                     , primaryGroup=searchGroup (primary) (getGroups(dataMaster))
+													                     , secundaryGroups=searchGroups(secondary)(getGroups(dataMaster))([])
+													                     , homeDirectory=homeDirectory(users!!0)
+													                     }])
+		else modifyUser4params (user) (primary) (secondary) (tail users) (dataMaster) (answer++[users!!0])
+
+modifyUser4paramsAux :: String -> String -> [String] -> [User] -> DataMaster -> [User] -> [User]
+modifyUser4paramsAux user primary secondary users dataMaster answer =
+	if users == [] then answer else
+	if user == userName(users!!0) 
+		then modifyUser4paramsAux (user) (primary) (secondary) (tail users) (dataMaster) (answer++[User { userName=userName(users!!0)
+													                     , userID=userID(users!!0)
+													                     , primaryGroup=primaryGroup(users!!0)
+													                     , secundaryGroups=searchGroups(secondary)(getGroups(dataMaster))([])
+													                     , homeDirectory=homeDirectory(users!!0)
+													                     }])
+		else modifyUser4paramsAux (user) (primary) (secondary) (tail users) (dataMaster) (answer++[users!!0])
+
+modifyUserDataMaster :: [User] -> DataMaster -> IO()
+modifyUserDataMaster chagedUsers dataMaster =
+	menu (DataMaster {users=chagedUsers, 
+					groups=(getGroups dataMaster), 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(getFileDir dataMaster)})
+
+modUser4params :: [String] -> DataMaster -> IO()
+modUser4params command dataMaster =
+	if(command!!1 == "-g") 
+		then modifyUserDataMaster (modifyUser4params (last command) (command!!2) ([]) (getUsers dataMaster) (dataMaster) ([])) (dataMaster)
+	else if(command!!1 == "-G") 
+		then modifyUserDataMaster (modifyUser4paramsAux (last command) ("") (getGroupName (command!!2) ("") ([])) (getUsers dataMaster) (dataMaster) ([])) (dataMaster)
+		else do
+			putStrLn "Error input params usermod"
+			menu dataMaster
+
+modifyUser6params :: String -> String -> [String] -> [User] -> DataMaster -> [User] -> [User]
+modifyUser6params user primary secondary users dataMaster answer =
+	if users == [] then answer else
+	if user == userName(users!!0) 
+		then modifyUser6params (user) (primary) (secondary) (tail users) (dataMaster) (answer++[User { userName=userName(users!!0)
+													                     , userID=userID(users!!0)
+													                     , primaryGroup=searchGroup (primary) (getGroups(dataMaster))
+													                     , secundaryGroups=searchGroups(secondary)(getGroups(dataMaster))([])
+													                     , homeDirectory=homeDirectory(users!!0)
+													                     }])
+		else modifyUser6params (user) (primary) (secondary) (tail users) (dataMaster) (answer++[users!!0])	
+	
+
+userModification :: [String] -> DataMaster -> IO()
+userModification command dataMaster =
+	if(length(command) == 2) 
+	then do
+		putStrLn "(usermod) Nothing to modify" 
+		menu dataMaster 
+	else if(length(command) == 4) 
+		then if(verifyUser(last command)) 
+			then modUser4params (command) (dataMaster) 
+			else do 
+				putStrLn "Error input usermod"
+				menu dataMaster
+	else if(length(command) == 6) 
+		then if(verifyUser(last command)) 
+			then modifyUserDataMaster (modifyUser6params (last command) (command!!2) (getGroupName (command!!4) ("") ([])) (getUsers dataMaster) (dataMaster) ([])) (dataMaster)
+			else do
+				putStrLn "Error input usermod"
+				menu dataMaster
+	else do
+		putStrLn "Error input usermod"
+		menu dataMaster
 
 -- Users and Groups ###############################
 
@@ -667,34 +790,16 @@ menu dataMaster = do
 		------------------------------------------
 		else if (head(command) == "userdel")
 			then do
-				if (userDel command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				userDel command dataMaster
 		------------------------------------------
 		else if (head(command) == "groupdel")
 			then do
-				if (groupDel command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				groupDel command dataMaster
 		------------------------------------------
 		-- NO FUNCIONA BIEN! COMPROBAR UNA VEZ EXISTAN LAS LISTAS
 		else if (head(command) == "usermod")
 			then do
-				if (userModification command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				userModification command dataMaster
 		------------------------------------------
 		else if (head(command) == "pvcreate")
 			then do
