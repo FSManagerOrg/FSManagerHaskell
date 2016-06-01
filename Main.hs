@@ -1,10 +1,13 @@
 {-# OPTIONS_GHC -fno-warn-tabs #-}
 import Data.Char
+import Data.Time
 
 -- Type Datas -------------------------------------
 
 data StorageDevice = StorageDevice { pathDev :: String
                      , sizeDev :: String
+                     , size :: Int
+                     , prefix :: String 
                      , manageByLVM :: Bool
                      } deriving (Show)
 
@@ -31,13 +34,34 @@ data VolumeGroup = VolumeGroup { logVolList :: [String]
                      , freeVgSize :: String
                      } deriving (Show)
 
-data FilesAndDirectories = FilesAndDirectories
-                     { user :: String
-                     , group :: String
-                     , hour :: String
-                     , fileName :: String
-                     , flagSymbLink :: Bool
-                     } deriving (Show)
+data File = File { nameFile :: String
+                     , content :: String
+                     , pathFile :: String
+                     , creationDateFile :: String
+                     , creationTimeFile :: String
+                     , userFile :: String
+                     , groupFile :: String
+                     } deriving (Show, Eq)
+
+data Directory = Directory { nameDirectory :: String
+                     , pathDirectory :: String
+                     , creationDateDirectory :: String
+                     , creationTimeDirectory :: String
+                     , userDirectory :: String
+                     , groupDirectory :: String
+                     , directories :: [Directory]
+                     , files :: [File]
+                     , symbolics :: [SymbolicLink]
+                     } deriving (Show, Eq)
+
+data SymbolicLink = SymbolicLink { nameSymbolic :: String
+                     , pathSymbolic :: String
+                     , pathToLink :: String
+                     , creationDateSymbolic :: String
+                     , creationTimeSymbolic :: String
+                     , userSymbolic :: String
+                     , groupSymbolic :: String
+                     } deriving (Show, Eq)
 
 data DataMaster = DataMaster 
                      { users :: [User]
@@ -45,11 +69,63 @@ data DataMaster = DataMaster
                      , stgdevices :: [StorageDevice]
                      , filesys :: [FileSystem]
                      , volgroup :: [VolumeGroup]
-                     , fileanddir :: [FilesAndDirectories]
+                     , fileanddir :: (Directory,Directory)
                      } deriving (Show)
 
 -- Type Datas -------------------------------------
-     
+
+-- Generic  ########################################
+
+getTime :: IO String
+getTime = do
+	now <- getCurrentTime
+	timezone <- getCurrentTimeZone
+	return (formatTime defaultTimeLocale "%R" (utcToLocalTime timezone now))
+
+getUsers :: DataMaster -> [User]
+getUsers dataMaster = users dataMaster
+
+getGroups :: DataMaster -> [Group]
+getGroups dataMaster = groups dataMaster
+
+getStgDev :: DataMaster -> [StorageDevice]
+getStgDev dataMaster = stgdevices dataMaster
+
+getFileSys :: DataMaster -> [FileSystem]
+getFileSys dataMaster = filesys dataMaster
+
+getVolGr :: DataMaster -> [VolumeGroup]
+getVolGr dataMaster = volgroup dataMaster
+
+getFileDir :: DataMaster -> (Directory,Directory)
+getFileDir dataMaster = fileanddir dataMaster
+
+getRootDirectory :: DataMaster -> Directory
+getRootDirectory dataMaster = fst(getFileDir(dataMaster))
+
+getActualPosition :: DataMaster -> Directory
+getActualPosition dataMaster = snd(getFileDir(dataMaster))
+
+defaultRootGroup :: Group
+defaultRootGroup = Group {groupName="root", 
+						groupID=1000,
+						associatedUsers=[]}
+
+defaultDirectory :: Directory
+defaultDirectory = Directory {nameDirectory="/"
+	             , pathDirectory = "/"
+	             , creationDateDirectory = "date"
+	             , creationTimeDirectory = "time"
+	             , userDirectory = "root"
+	             , groupDirectory = "root"
+	         	 , directories = []
+	         	 , files = []
+	         	 , symbolics = []} 
+
+menuDefault :: DataMaster -> IO()
+menuDefault dataMaster = createUser (words("useradd -g root root")) (dataMaster)
+
+-- Generic  ########################################     
 
 -- Users and Groups  ###############################
 
@@ -209,7 +285,10 @@ user4param command dataMaster =
 	if(	(tail(command))!!0 == "-g" &&
 		verifyGroup((tail(command))!!1) &&
 		verifyUser((tail(command))!!2)) 
-	then( addUser dataMaster command ) else ( putStrLn "Error parameters" )
+	then( addUser dataMaster command ) 
+		else do  
+			putStrLn "Error parameters"
+			menu dataMaster 
 
 group2aryExists :: [String] -> DataMaster -> Bool
 group2aryExists groups dataMaster =
@@ -474,297 +553,1087 @@ userModification command dataMaster =
 
 -- Users and Groups ###############################
 
--- Volume Groups ##################################
+-- Files and Directories ##########################
 
-pvcreateFunction :: [String] -> Bool
-pvcreateFunction command = 
+verifyDirsExist :: [String] -> Directory -> Bool
+verifyDirsExist path fromDir =
+	if length(path) == 1 then True
+	else verifyGoesTo (path) (directories(fromDir))
+
+verifyGoesTo :: [String] -> [Directory] -> Bool
+verifyGoesTo name dirs =
+	if dirs == [] then False else
+	if name!!0 == nameDirectory(dirs!!0) 
+		then verifyDirsExist (tail name) (dirs!!0)
+		else verifyGoesTo (name) (tail dirs)
+
+createPath :: String -> String -> [String] -> [String]
+createPath path dir answer =
+	if path == [] then answer else
+	if (last path) == '/' 
+		then createPath (init path) ("") ([dir]++answer)
+		else createPath (init path) ([(last path)]++dir) (answer)
+
+createDirectory :: [String] -> DataMaster -> IO()
+createDirectory command dataMaster =
+	if(command!!1 == "-p") 
+		then do
+			updateDirectoriesDataMaster (createDirectoryByForce (createPath(command!!2)("")([])) (command!!2) (getRootDirectory(dataMaster)) (dataMaster)) (dataMaster)
+			menu dataMaster
+	else if (head(command!!1) == '/') 
+		then if((createPath(command!!1)("")([]))!!0 /= "" && length(createPath(command!!1)("")([])) == 1) 
+			then newDirOnRoot ((createPath(command!!1)("")([]))!!0) (dataMaster)
+			else if(verifyDirsExist (createPath(command!!1)("")([])) (getRootDirectory(dataMaster))) 
+				then updateDirectoriesDataMaster (createDirectoryPath (createPath(command!!1)("")([])) (command!!1) (getRootDirectory(dataMaster)) (dataMaster)) (dataMaster)
+				else do
+					putStrLn "Error directory doesn't exist"
+					menu dataMaster
+		else do
+			putStrLn "Error input mkdir"
+			menu dataMaster
+
+newDirOnRoot :: String -> DataMaster -> IO()
+newDirOnRoot name dataMaster = 
+	menu (DataMaster {users=(getUsers dataMaster), 
+					groups=(getGroups dataMaster), 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(newDirOnRootAux(newDirectory(name)("/"))(dataMaster), newDirOnRootAux(newDirectory(name)("/"))(dataMaster))})
+
+newDirOnRootAux :: Directory -> DataMaster -> Directory
+newDirOnRootAux dirs dataMaster =
+	Directory {nameDirectory="/"
+	             , pathDirectory = "/"
+	             , creationDateDirectory = "date"
+	             , creationTimeDirectory = "time"
+	             , userDirectory = "root"
+	             , groupDirectory = "root"
+	         	 , directories = ((directories(getRootDirectory(dataMaster)))++[dirs])
+	         	 , files = files(getRootDirectory(dataMaster))
+	         	 , symbolics = []}
+
+createDirectoryinDirectory :: Directory -> String -> String -> Directory
+createDirectoryinDirectory destiny name path =
+	Directory {nameDirectory=nameDirectory(destiny)
+	             , pathDirectory = pathDirectory(destiny)
+	             , creationDateDirectory = creationDateDirectory(destiny)
+	             , creationTimeDirectory = creationTimeDirectory(destiny)
+	             , userDirectory = userDirectory(destiny)
+	             , groupDirectory = groupDirectory(destiny)
+	         	 , directories = (directories(destiny)++[newDirectory(name)(path)])
+	         	 , files = files(destiny)
+	         	 , symbolics = symbolics(destiny)}
+
+createDirectoryPath :: [String] -> String -> Directory -> DataMaster -> Directory
+createDirectoryPath path stringPath fromDir dataMaster =
+	if length(path) == 1 
+		then createDirectoryinDirectory (fromDir) (path!!0) (stringPath)
+		else goesTo (path) (stringPath) (fromDir) (directories(fromDir)) ([]) (dataMaster)
+
+goesTo :: [String] -> String -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+goesTo name path directoryFather dirs answer dataMaster = 
+	if (dirs == []) 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+		else if nameDirectory(dirs!!0) == name!!0 
+				then goesTo (name) (path) (directoryFather) (tail dirs) (answer++[createDirectoryPath (tail name) (path) (dirs!!0) (dataMaster)]) (dataMaster)
+				else goesTo (name) (path) (directoryFather) (tail dirs) (answer++[dirs!!0]) (dataMaster)
+
+createDirectoryByForce :: [String] -> String -> Directory -> DataMaster -> Directory
+createDirectoryByForce path stringPath fromDir dataMaster =
+	if length(path) == 1
+		then createDirectoryinDirectory (fromDir) (path!!0) (stringPath)
+		else goesToForce (path) (stringPath) (fromDir) (directories(fromDir)) ([]) (dataMaster)
+
+goesToForce :: [String] -> String -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+goesToForce name path directoryFather dirs answer dataMaster =
+	if existDirectoryinDirectory (name!!0) (dirs) 
+		then goesToForceAux (name) (path) (directoryFather) (dirs) (answer) (dataMaster)
+		else goesToForce (name) (path) (createDirectoryinDirectory (directoryFather) (name!!0) ((pathDirectory(directoryFather))++(name!!0))) (directories(createDirectoryinDirectory (directoryFather) (name!!0) ((pathDirectory(directoryFather))++(name!!0)))) (answer) (dataMaster)
+
+goesToForceAux :: [String] -> String -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+goesToForceAux name path directoryFather dirs answer dataMaster =
+	if (dirs == []) 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+             , pathDirectory = pathDirectory(directoryFather)
+             , creationDateDirectory = creationDateDirectory(directoryFather)
+             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+             , userDirectory = userDirectory(directoryFather)
+             , groupDirectory = groupDirectory(directoryFather)
+         	 , directories = answer
+         	 , files = files(directoryFather)
+         	 , symbolics = symbolics(directoryFather)} 
+		else if(nameDirectory(dirs!!0) == name!!0) 
+			then goesToForceAux (name) (path) (directoryFather) (tail dirs) (answer++[createDirectoryByForce (tail name) (path) (dirs!!0) (dataMaster)]) (dataMaster)
+			else goesToForceAux (name) (path) (directoryFather) (tail dirs) (answer++[dirs!!0]) (dataMaster)
+
+existDirectoryinDirectory :: String -> [Directory] -> Bool
+existDirectoryinDirectory name dirs =
+	if dirs == [] then False else
+	if nameDirectory(dirs!!0) == name then True
+		else existDirectoryinDirectory name (tail dirs)
+
+updateDirectoriesDataMaster :: Directory -> DataMaster -> IO()
+updateDirectoriesDataMaster dir dataMaster =
+	menu (DataMaster {users=(getUsers dataMaster), 
+					groups=(getGroups dataMaster), 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(dir, dir)})
+
+updateDirectories :: [Directory] -> DataMaster -> IO()
+updateDirectories dirs dataMaster =
+	menu (DataMaster {users=(getUsers dataMaster), 
+					groups=(getGroups dataMaster), 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(updateRootDirectory(dirs)(dataMaster), getActualPosition(dataMaster))})
+
+updateRootDirectory :: [Directory] -> DataMaster -> Directory
+updateRootDirectory dirs dataMaster =
+	Directory {nameDirectory="/"
+	             , pathDirectory = "/"
+	             , creationDateDirectory = "date"
+	             , creationTimeDirectory = "time"
+	             , userDirectory = "root"
+	             , groupDirectory = "root"
+	         	 , directories = dirs
+	         	 , files = []
+	         	 , symbolics = []}
+
+newDirectory :: String -> String -> Directory
+newDirectory name path =
+	Directory {nameDirectory=name
+	             , pathDirectory = path
+	             , creationDateDirectory = "date"
+	             , creationTimeDirectory = "time"
+	             , userDirectory = "root"
+	             , groupDirectory = "root"
+	         	 , directories = []
+	         	 , files = []
+	         	 , symbolics = []}
+
+cdCommand :: [String] -> DataMaster -> IO()
+cdCommand command dataMaster =
 	if(length(command) == 2) 
-		then( if( (take 5(command!!1)) == "/dev/" &&
-					(drop 5(command!!1)) /= "" ) 
-				then(True) 
-				else(False)) 
-	else False
+		then if(command!!1 == "/") 
+			then updateActualDirectory (getRootDirectory dataMaster) (dataMaster)
+			else if(head (command!!1) == '/') 
+				then cdCommandAux (createPath(command!!1)("")([])) (dataMaster)
+				else do
+				putStrLn "Error input cd command. (/)"
+				menu dataMaster 
+		else do
+			putStrLn "Error input cd command."
+			menu dataMaster
+			
 
-verifyVGName :: String -> Bool
-verifyVGName name =
-	if( sizeTest(name) (32) && allCorrect(name) ) then True else False
+cdCommandAux :: [String] -> DataMaster -> IO()
+cdCommandAux path dataMaster =
+	if(length(path) == 1 && path!!0 == "") 
+		then updateActualDirectory (getRootDirectory dataMaster) (dataMaster)
+	else if(existDirectory (path) (getRootDirectory dataMaster)) 
+		then advanceInDirectories (path) (directories(getRootDirectory dataMaster)) (dataMaster) (getRootDirectory dataMaster)
+		else if(existLink(path) (getRootDirectory dataMaster)) 
+			then advanceInLinkDir (path) (getRootDirectory dataMaster) (dataMaster)
+			else do
+				putStrLn "Directory doesn't exist."
+				menu dataMaster
 
-vgcreateAux :: [String] -> String -> Bool
-vgcreateAux devs name =
-	if devs == [] then True else
-	if ((take 5(devs!!0)) == "/dev/" && (drop 5(devs!!0)) /= "") 
-		then ( vgcreateAux (tail devs) (name) )
-	else (False)
+advanceInDirectories :: [String] -> [Directory] -> DataMaster -> Directory -> IO()
+advanceInDirectories path dirs dataMaster answer =
+	if path == [] then updateActualDirectory (answer) (dataMaster) else
+	if path!!0 == nameDirectory(dirs!!0) 
+		then advanceInDirectories (tail path) (directories(dirs!!0)) (dataMaster) (dirs!!0)
+		else advanceInDirectories (path) (tail dirs) (dataMaster) (answer)
 
-vgcreateFunction :: [String] -> Bool
-vgcreateFunction command =
-	if(length(command) >= 3) 
-		then( if( verifyVGName(command!!1) ) 
-			then( vgcreateAux(drop 2(command)) (command!!1)) 
-			else( False ) ) 
-	else(False)
+updateActualDirectory :: Directory -> DataMaster -> IO()
+updateActualDirectory dir dataMaster =
+	menu (DataMaster {users=(getUsers dataMaster), 
+					groups=(getGroups dataMaster), 
+					stgdevices=(getStgDev dataMaster),
+					filesys=(getFileSys dataMaster),
+					volgroup=(getVolGr dataMaster),
+					fileanddir=(getRootDirectory dataMaster, dir)})
 
-vgreduceFunction :: [String] -> Bool
-vgreduceFunction command =
-	if(length(command) == 3) 
-		then( if( verifyVGName(command!!1) ) 
-				then( if( (take 5(command!!2)) == "/dev/" &&
-							(drop 5(command!!2)) /= "" ) 
-					then(True) 
-					else(False) ) 
-				else(False) ) 
-	else(False)
+existLink :: [String] -> Directory -> Bool
+existLink path dir =
+	if length(path) == 1 then isLink (path!!0) (symbolics(dir))
+	else existLinkAux (path) (directories(dir))
 
-vgextendFunction :: [String] -> Bool
-vgextendFunction command =
-	if(length(command) == 3) 
-		then( if( verifyVGName(command!!1) ) 
-				then( if( (take 5(command!!2)) == "/dev/" &&
-							(drop 5(command!!2)) /= "" ) 
-					then(True) 
-					else(False) ) 
-				else(False) ) 
-	else(False)
+existLinkAux :: [String] -> [Directory] -> Bool
+existLinkAux path dirs =
+	if dirs == [] then False else
+	if path!!0 == nameDirectory(dirs!!0)
+		then existLink (tail path) (dirs!!0)
+		else existLinkAux (path) (tail dirs)
 
-vgDisplay :: [String] -> Bool
-vgDisplay command =
-	if(length(command) == 1) 
-		then( True ) 
-	else if(length(command) == 2) 
-		then( if( command!!1 == "-v" ) 
-			then( True ) 
-			else( if( verifyVGName(command!!1) ) 
-				then( True ) else(False) ) ) 
-	else if(length(command) == 3) 
-		then( if(command!!1 == "-v" && verifyVGName(command!!2)) 
-			then( True ) 
-			else( False ) ) 
-		else( False )
+isLink :: String -> [SymbolicLink] -> Bool
+isLink name syms =
+	if syms == [] then False else
+	if name == nameSymbolic(syms!!0)
+		then True
+		else False 
 
-vgRemove :: [String] -> Bool
-vgRemove command =
-	if( length(command) == 2 ) 
-		then( if( verifyVGName(command!!1) ) 
-			then( True ) 
-			else( False ) ) 
-		else( False )
+advanceInLinkDir :: [String] -> Directory -> DataMaster -> IO()
+advanceInLinkDir path dir dataMaster =
+	cdCommandAux (goesToLink (path) (getRootDirectory dataMaster)) (dataMaster)
 
-verifyLVName :: String -> Bool
-verifyLVName name =
-	if( sizeTest(name) (32) && allCorrect(name) ) then True else False
+goesToLink :: [String] -> Directory -> [String]
+goesToLink path dir =
+	if length(path) == 1 then getPathLink (path!!0) (symbolics(dir))
+	else goesToLinkAux (path) (directories(dir))
 
-lvCreate :: [String] -> Bool
-lvCreate command =
-	if(length(command) >= 6) 
-		then( if( command!!1 == "-L" && command!!3 == "-n" &&
-			verifyLVName(command!!4) && verifyVGName(command!!5)) 
-			then( if (last(command!!2) == 'G' || last(command!!2) == 'M') 
-				then( True ) else( False )) 
-				else( False ) ) 
-		else( False )  
+goesToLinkAux :: [String] -> [Directory] -> [String]
+goesToLinkAux path dirs =
+	if path!!0 == nameDirectory(dirs!!0)
+		then goesToLink (tail path) (dirs!!0)
+		else goesToLinkAux (path) (tail dirs) 
 
--- Volume Groups ##################################
+getPathLink :: String -> [SymbolicLink] -> [String]
+getPathLink name syms = 
+	if name == nameSymbolic(syms!!0) then (createPath (pathToLink(syms!!0)) ("") ([]))
+	else getPathLink (name) (tail syms)
 
--- Storage Devices ##################################
+newFile :: String -> String -> File
+newFile name path = File { nameFile = name
+                     , content = ""
+                     , pathFile = path
+                     , creationDateFile = "date"
+                     , creationTimeFile = "time"
+                     , userFile = "root"
+                     , groupFile = "root"
+                     }
 
--- | Check the size number
-{-verifyNumber :: String -> Bool
-verifyNumber num = 
-	(if (num == "")
-	 then True 
-	 else ( if(isDigit (head (num))) 
-	 	    then(verifyNumber (drop 1(num)))
-	        else(False) ) )
+createFileinDirectory :: Directory -> String -> String -> Directory
+createFileinDirectory destiny name path =
+		Directory {nameDirectory=nameDirectory(destiny)
+	             , pathDirectory = pathDirectory(destiny)
+	             , creationDateDirectory = creationDateDirectory(destiny)
+	             , creationTimeDirectory = creationTimeDirectory(destiny)
+	             , userDirectory = userDirectory(destiny)
+	             , groupDirectory = groupDirectory(destiny)
+	         	 , directories = (directories(destiny))
+	         	 , files = (files(destiny)++[newFile(name)(path)])
+	         	 , symbolics = symbolics(destiny)}
+
+touchCommand :: [String] -> DataMaster -> IO()
+touchCommand command dataMaster =
+	if(length(command) == 2)
+		then if(head(command!!1) == '/')
+			then if(verifyDirsExist (createPath(command!!1)("")([])) (getRootDirectory dataMaster)) 
+				then updateDirectoriesDataMaster (createFile (createPath(command!!1)("")([])) (command!!1) (getRootDirectory(dataMaster)) (dataMaster)) (dataMaster) 
+				else do
+					putStrLn "Directory doesn't exist."
+					menu dataMaster
+			else updateDirectoriesDataMaster (createFile (createPath((pathDirectory(getActualPosition dataMaster))++command!!1)("")([])) ((pathDirectory(getActualPosition dataMaster))++command!!1) (getRootDirectory(dataMaster)) (dataMaster)) (dataMaster) 
+ 		else do
+ 			putStrLn "Error input touch."
+ 			menu dataMaster
+
+createFile :: [String] -> String -> Directory -> DataMaster -> Directory
+createFile path stringPath fromDir dataMaster =
+	if(length(path) == 1)
+		then createFileinDirectory (fromDir) (path!!0) (stringPath)
+		else createFileAux (path) (stringPath) (fromDir) (directories(fromDir)) ([]) (dataMaster)
+
+createFileAux :: [String] -> String -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+createFileAux name path directoryFather dirs answer dataMaster =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if nameDirectory(dirs!!0) == name!!0
+	    	then createFileAux (name) (path) (directoryFather) (tail dirs) (answer++[createFile (tail name) (path) (dirs!!0) (dataMaster)]) (dataMaster)
+	    	else createFileAux (name) (path) (directoryFather) (tail dirs) (answer++[dirs!!0]) (dataMaster)
+
+fileExist :: [String] -> Directory -> Bool
+fileExist path dir =
+	if length(path) == 1 then isFileThere(path!!0) (files(dir))
+	else
+		fileExistAux (path) (dir) (directories(dir))
+
+fileExistAux :: [String] -> Directory -> [Directory] -> Bool
+fileExistAux name directoryFather dirs =
+	if dirs == [] then False
+	else if(name!!0 == nameDirectory(dirs!!0)) 
+		then fileExist (tail name) (dirs!!0) 
+		else fileExistAux (name) (directoryFather) (tail dirs)
+
+isFileThere :: String -> [File] -> Bool
+isFileThere name filesDir =
+	if filesDir == [] then False
+		else if(name == nameFile(filesDir!!0)) 
+			then True 
+			else False
+
+verifyEcho :: [String] -> DataMaster -> Bool
+verifyEcho command dataMaster =
+	if(head(command!!1) == '"' && last(command!!1) == '"' && length(command!!1) > 2)
+		then if((command!!2) == ">>" && fileExist(createPath(command!!3)("")([]))(getRootDirectory dataMaster))
+			then True
+			else False
+		else False
+
+echoCommand :: [String] -> DataMaster -> IO()
+echoCommand command dataMaster =
+	if length(command) == 4
+		then if(verifyEcho(command)(dataMaster))
+			then updateDirectoriesDataMaster (writeInFile (createPath(command!!3)("")([])) (command!!3) (command!!1) (getRootDirectory dataMaster) (dataMaster)) (dataMaster)
+			else do
+				putStrLn "Error in echo command or file doesn't exist"
+				menu dataMaster
+		else do
+			putStrLn "Error input in command echo"
+			menu dataMaster
+
+writeInFile :: [String] -> String -> String -> Directory -> DataMaster -> Directory
+writeInFile path stringPath info dir dataMaster =
+	if length(path) == 1 
+		then writeDataInFile (path!!0) (info) (files(dir)) (dir) ([])
+		else writeInFileAux (path) (stringPath) (info) (dir) (directories(dir)) ([]) (dataMaster)
+
+writeInFileAux :: [String] -> String -> String -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+writeInFileAux name path info directoryFather dirs answer dataMaster =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if name!!0 == nameDirectory(dirs!!0)
+	    	then writeInFileAux (name) (path) (info) (directoryFather) (tail dirs) (answer++[writeInFile(tail name) (path) (info) (dirs!!0) (dataMaster)]) (dataMaster)
+	    	else writeInFileAux (name) (path) (info) (directoryFather) (tail dirs) (answer++[dirs!!0]) (dataMaster)
+
+writeDataInFile :: String -> String -> [File] -> Directory -> [File] -> Directory
+writeDataInFile name info filesDir directoryFather answer =
+	if filesDir == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = directories(directoryFather)
+	         	 , files = answer
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if (nameFile(filesDir!!0) == name)  
+	    	then writeDataInFile (name) (info) (tail filesDir) (directoryFather) (answer++[writeDataInFileAux(info)(filesDir!!0)])
+	    	else writeDataInFile (name) (info) (tail filesDir) (directoryFather) (answer++[filesDir!!0])
+		
+writeDataInFileAux :: String -> File -> File
+writeDataInFileAux info file =
+	File { nameFile = nameFile(file)
+         , content = ((content(file))++['\n']++info)
+         , pathFile = pathFile(file)
+         , creationDateFile = creationDateFile(file)
+         , creationTimeFile = creationTimeFile(file)
+         , userFile = userFile(file)
+         , groupFile = groupFile(file)}
+
+rmdirCommand :: [String] -> DataMaster -> IO()
+rmdirCommand command dataMaster =
+	if length(command) == 2
+		then if(existAndEmptyDirectory (createPath(command!!1)("")([])) (getRootDirectory dataMaster)) 
+			then updateDirectoriesDataMaster (deleteDirectory(createPath(command!!1)("")([])) (getRootDirectory dataMaster) (dataMaster)) (dataMaster)
+			else do
+				putStrLn "Error removing directory. The directory ins't empty or not exist."
+				menu dataMaster
+		else do
+			putStrLn "Error, file doesn't exist or path is incorrect."
+			menu dataMaster
+
+existAndEmptyDirectory :: [String] -> Directory -> Bool
+existAndEmptyDirectory path dir =
+	if length(path) == 1 then verifyEmptyDirectory (path!!0) (directories(dir))
+	else
+		existAndEmptyDirectoryAux (path) (dir) (directories(dir))
+
+existAndEmptyDirectoryAux :: [String] -> Directory -> [Directory] -> Bool
+existAndEmptyDirectoryAux path dir dirs =
+	if dirs == [] then False
+	else if(path!!0 == nameDirectory(dirs!!0)) 
+		then existAndEmptyDirectory (tail path) (dirs!!0)
+		else existAndEmptyDirectoryAux (path) (dir) (tail dirs)
+
+verifyEmptyDirectory :: String -> [Directory] -> Bool
+verifyEmptyDirectory name dirs =
+	if dirs == [] then False else
+	if name == nameDirectory(dirs!!0) 
+		then if(directories(dirs!!0) == [] && files(dirs!!0) == []) 
+			then True
+			else False
+		else verifyEmptyDirectory (name) (tail dirs)
+
+deleteDirectory :: [String] -> Directory -> DataMaster -> Directory
+deleteDirectory path dir dataMaster =
+	if length(path) == 1 then deleteDirectoryCompletely (path!!0) (dir) (directories(dir)) ([])
+	else
+		deleteDirectoryAux (path) (dir) (directories(dir)) ([]) (dataMaster)
+
+deleteDirectoryAux :: [String] -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+deleteDirectoryAux path directoryFather dirs answer dataMaster =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if(path!!0 == nameDirectory(dirs!!0)) 
+	    	then deleteDirectoryAux (path) (directoryFather) (tail dirs) (answer++[deleteDirectory (tail path) (dirs!!0) (dataMaster)]) (dataMaster)
+ 	    	else deleteDirectoryAux (path) (directoryFather) (tail dirs) (answer++[dirs!!0]) (dataMaster)
+
+deleteDirectoryCompletely :: String -> Directory -> [Directory] -> [Directory] -> Directory
+deleteDirectoryCompletely name directoryFather dirs answer =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if(name == nameDirectory(dirs!!0))
+	    	then deleteDirectoryCompletely (name) (directoryFather) (tail dirs) (answer)
+	    	else deleteDirectoryCompletely (name) (directoryFather) (tail dirs) (answer++[dirs!!0])
+
+rmCommand :: [String] -> DataMaster -> IO()
+rmCommand command dataMaster =
+	if length(command) == 2
+		then if (fileExist (createPath(command!!1) ("") ([])) (getRootDirectory dataMaster))
+			then updateDirectoriesDataMaster (deleteFile (createPath(command!!1)("")([])) (getRootDirectory dataMaster) (dataMaster)) (dataMaster)
+			else if(symbolicExist (createPath (command!!1) ("") ([])) (getRootDirectory dataMaster)) 
+				then updateDirectoriesDataMaster (deleteSymbolic (createPath(command!!1)("")([])) (getRootDirectory dataMaster) (dataMaster)) (dataMaster)
+				else do 
+					putStrLn "File or symbolic link doesn't exist."
+					menu dataMaster 
+		else if(length(command) == 3) 
+			then if((command!!1) == "-rf" || (command!!1) == "-fr") 
+				then if(existDirectory (createPath(command!!2) ("") ([])) (getRootDirectory dataMaster)) 
+					then updateDirectoriesDataMaster (deleteDirectory(createPath(command!!2)("")([])) (getRootDirectory dataMaster) (dataMaster)) (dataMaster)
+					else do 
+						putStrLn "Error deleting file, directory doesn't exist."
+						menu dataMaster
+				else do
+					putStrLn "Error input rm command."
+					menu dataMaster
+			else do
+				putStrLn "Error input rm command."
+				menu dataMaster 
+
+symbolicExist :: [String] -> Directory -> Bool
+symbolicExist path directoryFather =
+	if length(path) == 1 then lookForSymbolic (path!!0) (symbolics(directoryFather))
+	else symbolicExistAux (path) (directoryFather) (directories(directoryFather))
+
+symbolicExistAux :: [String] -> Directory -> [Directory] -> Bool
+symbolicExistAux path directoryFather dirs =
+	if dirs == [] then False else
+	if path!!0 == nameDirectory(dirs!!0) then symbolicExist (tail path) (dirs!!0)
+	else symbolicExistAux (path) (directoryFather) (tail dirs)
+
+lookForSymbolic :: String -> [SymbolicLink] -> Bool
+lookForSymbolic name dirs =
+	if dirs == [] then False else
+	if name == nameSymbolic(dirs!!0) then True 
+	else lookForSymbolic (name) (tail dirs)
+
+deleteSymbolic :: [String] -> Directory -> DataMaster -> Directory
+deleteSymbolic path dir dataMaster =
+	if length(path) == 1 then deleteSymbolicCompletely (path!!0) (dir) (symbolics(dir)) ([])
+	else
+		deleteSymbolicAux (path) (dir) (directories(dir)) ([]) (dataMaster)
+
+deleteSymbolicAux :: [String] -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+deleteSymbolicAux path directoryFather dirs answer dataMaster =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if (path!!0 == nameDirectory(dirs!!0))
+	    	then deleteSymbolicAux (path) (directoryFather) (tail dirs) (answer++[deleteSymbolic (tail path) (dirs!!0) (dataMaster)]) (dataMaster)
+	    	else deleteSymbolicAux (path) (directoryFather) (tail dirs) (answer++[dirs!!0]) (dataMaster)
+
+deleteSymbolicCompletely :: String -> Directory -> [SymbolicLink] -> [SymbolicLink] -> Directory
+deleteSymbolicCompletely name directoryFather filesDir answer =
+	if filesDir == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = directories(directoryFather)
+	         	 , files = files(directoryFather)
+	         	 , symbolics = answer}
+	    else if (nameSymbolic(filesDir!!0) == name)
+		    then deleteSymbolicCompletely (name) (directoryFather) (tail filesDir) (answer)
+		    else deleteSymbolicCompletely (name) (directoryFather) (tail filesDir) (answer++[filesDir!!0])
+
+existDirectory :: [String] -> Directory -> Bool
+existDirectory path dir =
+	if length(path) == 1 then existDirectoryinDirectory (path!!0) (directories(dir))
+		else existDirectoryAux (path) (dir) (directories(dir))
+
+existDirectoryAux :: [String] -> Directory -> [Directory] -> Bool
+existDirectoryAux path directoryFather dirs =
+	if dirs == [] then False else
+	if path!!0 == nameDirectory(dirs!!0) then existDirectory (tail path) (dirs!!0)
+	else existDirectoryAux (path) (directoryFather) (tail dirs) 
+
+deleteFile :: [String] -> Directory -> DataMaster -> Directory
+deleteFile path dir dataMaster =
+	if length(path) == 1 then deleteFileCompletely (path!!0) (dir) (files(dir)) ([])
+	else
+		deleteFileAux (path) (dir) (directories(dir)) ([]) (dataMaster)
+
+deleteFileAux :: [String] -> Directory -> [Directory] -> [Directory] -> DataMaster -> Directory
+deleteFileAux path directoryFather dirs answer dataMaster =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if (path!!0 == nameDirectory(dirs!!0))
+	    	then deleteFileAux (path) (directoryFather) (tail dirs) (answer++[deleteFile (tail path) (dirs!!0) (dataMaster)]) (dataMaster)
+	    	else deleteFileAux (path) (directoryFather) (tail dirs) (answer++[dirs!!0]) (dataMaster)
+
+deleteFileCompletely :: String -> Directory -> [File] -> [File] -> Directory
+deleteFileCompletely name directoryFather filesDir answer =
+	if filesDir == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = directories(directoryFather)
+	         	 , files = answer
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if (nameFile(filesDir!!0) == name)
+		    then deleteFileCompletely (name) (directoryFather) (tail filesDir) (answer)
+		    else deleteFileCompletely (name) (directoryFather) (tail filesDir) (answer++[filesDir!!0])
+
+chownCommand :: [String] -> DataMaster -> IO()
+chownCommand command dataMaster =
+	if length(command) == 3
+		then if (existUserGroup (command!!1) (dataMaster))
+			then if((fileExist (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster)) || (existDirectory (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster))) 
+				then if(isADirectory (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster)) 
+					then updateDirectoriesDataMaster (changeUserGroupDir (createPath (command!!2) ("") ([])) (getUserGroup (command!!1) ("") ([]))  (getRootDirectory dataMaster)) (dataMaster)
+					else updateDirectoriesDataMaster (changeUserGroupFile (createPath (command!!2) ("") ([])) (getUserGroup (command!!1) ("") ([])) (getRootDirectory dataMaster)) (dataMaster)
+				else do
+					putStrLn "Error input chown command"
+					menu dataMaster 
+			else do
+				putStrLn "Error, group or user introduced doesn't exist."
+				menu dataMaster
+		else if length(command) == 4 
+			then if(command!!1 == "-R")
+				then if (existUserGroup (command!!2) (dataMaster))
+					then if((existDirectory (createPath (command!!3) ("") ([])) (getRootDirectory dataMaster)))
+						then if(isADirectory (createPath (command!!3) ("") ([])) (getRootDirectory dataMaster)) 
+							then updateDirectoriesDataMaster (changeInfoForceDir (createPath (command!!3) ("") ([])) (getUserGroup (command!!2) ("") ([])) (getRootDirectory dataMaster)) (dataMaster)
+							else do
+								putStrLn "Error input chown command"
+								menu dataMaster
+						else do
+							putStrLn "Error input chown command"
+							menu dataMaster
+					else do
+						putStrLn "Error input chown command"
+						menu dataMaster
+				else do
+					putStrLn "Error input chown command"
+					menu dataMaster
+			else do
+				putStrLn "Error input chown command"
+				menu dataMaster
+
+isADirectory :: [String] -> Directory -> Bool
+isADirectory path directoryFather =
+	if length(path) == 1 then isDirThere (path!!0) (directories(directoryFather)) 
+	else isADirectoryAux (path) (directoryFather) (directories(directoryFather))
+
+isADirectoryAux :: [String] -> Directory -> [Directory] -> Bool
+isADirectoryAux path directoryFather dirs =
+	if path!!0 == nameDirectory(dirs!!0) then isADirectory (tail path) (dirs!!0)
+	else isADirectoryAux (path) (directoryFather) (tail dirs)
+
+isDirThere :: String -> [Directory] -> Bool
+isDirThere name dirs =
+	if dirs == [] then False else
+	if name == nameDirectory(dirs!!0) then True
+		else isDirThere (name) (tail dirs)
+
+existUserGroup :: String -> DataMaster -> Bool
+existUserGroup command dataMaster =
+	if length(getUserGroup(command)("")([])) == 2
+		then if existUser ((getUserGroup(command)("")([]))!!0) (getUsers(dataMaster))
+			then if existGroup ((getUserGroup(command)("")([]))!!1) (getGroups(dataMaster))
+				then True
+				else False
+			else False
+		else False
+
+existUser :: String -> [User] -> Bool
+existUser name users =
+	if users == [] then False else
+	if name == userName(users!!0) then True
+		else existUser (name) (tail users)
+
+existGroup :: String -> [Group] -> Bool
+existGroup name groups =
+	if groups == [] then False else
+	if name == groupName(groups!!0) then True
+		else existGroup (name) (tail groups)
+
+getUserGroup :: String -> String -> [String] -> [String]
+getUserGroup command word answer =
+	if command == "" then answer++[word] else
+	if command!!0 == ':' then getUserGroup (tail command) ("") (answer++[word]) else
+	getUserGroup (tail command) (word++[command!!0]) (answer)
+
+changeUserGroupDir :: [String] -> [String] -> Directory -> Directory
+changeUserGroupDir path info directoryFather =
+	if length(path) == 1 then changeInfoDir (path!!0) (info) (directoryFather) (directories(directoryFather)) ([])
+	else
+		changeUserGroupDirAux (path) (info) (directoryFather) (directories(directoryFather)) ([])
+
+changeUserGroupDirAux :: [String] -> [String] -> Directory -> [Directory] -> [Directory] -> Directory
+changeUserGroupDirAux path info directoryFather dirs answer =
+	if dirs == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if path!!0 == nameDirectory(dirs!!0) 
+	    	then changeUserGroupDirAux (path) (info) (directoryFather) (tail dirs) (answer++[changeUserGroupDir (tail path) (info) (dirs!!0)])
+	    	else changeUserGroupDirAux (path) (info) (directoryFather) (tail dirs) (answer++[dirs!!0]) 
+
+changeInfoDir :: String -> [String] -> Directory -> [Directory] -> [Directory] -> Directory
+changeInfoDir name info directoryFather dirs answer =
+	if dirs == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if (name == nameDirectory(dirs!!0))
+	    	then changeInfoDir (name) (info) (directoryFather) (tail dirs) (answer++[Directory {nameDirectory=nameDirectory(dirs!!0)
+																				             , pathDirectory = pathDirectory(dirs!!0)
+																				             , creationDateDirectory = creationDateDirectory(dirs!!0)
+																				             , creationTimeDirectory = creationTimeDirectory(dirs!!0)
+																				             , userDirectory = (info!!0)
+																				             , groupDirectory = (info!!1)
+																				         	 , directories = directories(dirs!!0)
+																				         	 , files = files(dirs!!0)
+																				         	 , symbolics = symbolics(dirs!!0)}])
+	    	else changeInfoDir (name) (info) (directoryFather) (tail dirs) (answer++[dirs!!0])
+
+changeUserGroupFile :: [String] -> [String] -> Directory -> Directory
+changeUserGroupFile path info directoryFather =
+	if length(path) == 1 then changeInfoFile (path!!0) (info) (directoryFather) (files(directoryFather)) ([])
+	else
+		changeUserGroupFileAux (path) (info) (directoryFather) (directories(directoryFather)) ([]) 
+
+changeUserGroupFileAux :: [String] -> [String] -> Directory -> [Directory] -> [Directory] -> Directory
+changeUserGroupFileAux path info directoryFather dirs answer =
+	if dirs == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = answer
+	         	 , files = files(directoryFather)
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if path!!0 == nameDirectory(dirs!!0) 
+	    	then changeUserGroupDirAux (path) (info) (directoryFather) (tail dirs) (answer++[changeUserGroupDir (tail path) (info) (dirs!!0)])
+	    	else changeUserGroupDirAux (path) (info) (directoryFather) (tail dirs) (answer++[dirs!!0]) 
+
+changeInfoFile :: String -> [String] -> Directory -> [File] -> [File] -> Directory
+changeInfoFile name info directoryFather dirs answer =
+	if dirs == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+	             , pathDirectory = pathDirectory(directoryFather)
+	             , creationDateDirectory = creationDateDirectory(directoryFather)
+	             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+	             , userDirectory = userDirectory(directoryFather)
+	             , groupDirectory = groupDirectory(directoryFather)
+	         	 , directories = directories(directoryFather)
+	         	 , files = answer
+	         	 , symbolics = symbolics(directoryFather)}
+	    else if name == nameFile(dirs!!0)
+	    	then changeInfoFile (name) (info) (directoryFather) (tail dirs) (answer++[File { nameFile = nameFile(dirs!!0)
+																				         , content = content(dirs!!0)
+																				         , pathFile = pathFile(dirs!!0)
+																				         , creationDateFile = creationDateFile(dirs!!0)
+																				         , creationTimeFile = creationTimeFile(dirs!!0)
+																				         , userFile = (info!!0)
+																				         , groupFile = (info!!1)}])
+	    	else changeInfoFile (name) (info) (directoryFather) (tail dirs) (answer++[dirs!!0])
+
+changeInfoForceDir :: [String] -> [String] -> Directory -> Directory
+changeInfoForceDir path info directoryFather =
+	if path == [] 
+		then changeFilesAndDirsUserGroupForce (info) (directoryFather)
+		else changeInfoForceDirAux (path) (info) (directoryFather) (directories(directoryFather)) ([])
+
+changeInfoForceDirAux :: [String] -> [String] -> Directory -> [Directory] -> [Directory] -> Directory
+changeInfoForceDirAux path info directoryFather dirs answer =
+	if dirs == [] 
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+		             , pathDirectory = pathDirectory(directoryFather)
+		             , creationDateDirectory = creationDateDirectory(directoryFather)
+		             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+		             , userDirectory = userDirectory(directoryFather)
+		             , groupDirectory = groupDirectory(directoryFather)
+		         	 , directories = answer
+		         	 , files = files(directoryFather)
+		         	 , symbolics = symbolics(directoryFather)}
+		else
+			if(path!!0 == nameDirectory(dirs!!0)) 
+				then changeInfoForceDirAux (path) (info) (directoryFather) (tail dirs) (answer++[changeInfoForceDir (tail path) (info) (dirs!!0)])   
+				else changeInfoForceDirAux (path) (info) (directoryFather) (tail dirs) (answer++[dirs!!0])
+
+changeFilesAndDirsUserGroupForce :: [String] -> Directory -> Directory
+changeFilesAndDirsUserGroupForce info directoryFather =
+	Directory {nameDirectory=nameDirectory(directoryFather)
+             , pathDirectory = pathDirectory(directoryFather)
+             , creationDateDirectory = creationDateDirectory(directoryFather)
+             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+             , userDirectory = info!!0
+             , groupDirectory = info!!1
+         	 , directories = (updateDirectoriesUserGroup (info) (directories(directoryFather)) ([]))
+         	 , files = (updateFilesUserGroup (info) (files(directoryFather)) ([]))
+         	 , symbolics = symbolics(directoryFather)}
+
+updateDirectoriesUserGroup :: [String] -> [Directory] -> [Directory] -> [Directory]
+updateDirectoriesUserGroup info dirs answer =
+	if dirs == [] then answer
+		else updateDirectoriesUserGroup (info) (tail dirs) (answer++[Directory {nameDirectory=nameDirectory(dirs!!0)
+																             , pathDirectory = pathDirectory(dirs!!0)
+																             , creationDateDirectory = creationDateDirectory(dirs!!0)
+																             , creationTimeDirectory = creationTimeDirectory(dirs!!0)
+																             , userDirectory = (info!!0)
+																             , groupDirectory = (info!!1)
+																         	 , directories = directories(dirs!!0)
+																         	 , files = files(dirs!!0)
+																         	 , symbolics = symbolics(dirs!!0)}])
+
+updateFilesUserGroup :: [String] -> [File] -> [File] -> [File]
+updateFilesUserGroup info dirs answer =
+	if dirs == [] then answer
+		else updateFilesUserGroup (info) (tail dirs) (answer++[File { nameFile = nameFile(dirs!!0)
+														         , content = content(dirs!!0)
+														         , pathFile = pathFile(dirs!!0)
+														         , creationDateFile = creationDateFile(dirs!!0)
+														         , creationTimeFile = creationTimeFile(dirs!!0)
+														         , userFile = (info!!0)
+														         , groupFile = (info!!1)}])
+
+lsCommand :: [String] -> DataMaster -> IO()
+lsCommand command dataMaster =
+	if (length(command) == 1) 
+		then do
+			lsPrintDirectories (directories(getActualPosition(dataMaster)))
+			lsPrintFiles (files(getActualPosition(dataMaster)))
+			lsPrintSymbolics (symbolics(getActualPosition(dataMaster)))
+			putStrLn ""
+			menu dataMaster
+		else if(length(command) == 2) 
+			then if(command!!1 == "/") 
+				then do
+					lsPrintDirectories (directories(getRootDirectory dataMaster))
+					lsPrintFiles (files(getRootDirectory dataMaster))
+					lsPrintSymbolics (symbolics(getRootDirectory dataMaster))
+					putStrLn ""
+					menu dataMaster
+				else if(command!!1 == "-l")
+						then do
+							putStrLn "Error input ls command."
+							menu dataMaster
+						else if(isADirectory (createPath (command!!1) ("") ([])) (getRootDirectory dataMaster))
+							then do 
+								advanceToPrint (createPath (command!!1) ("") ([])) (getRootDirectory dataMaster)
+								menu dataMaster
+							else do
+								putStrLn "Error input ls command"
+								menu dataMaster
+			else if(length(command) == 3)
+				then if(command!!1 == "-l")
+					then if(command!!2 == "/") 
+						then do
+							printRootDetails dataMaster
+							menu dataMaster
+						else if(isADirectory (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster))
+							then do
+								advanceToPrintDetails (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster)
+								menu dataMaster
+							else do
+								putStrLn "Error input ls command"
+								menu dataMaster
+						else do
+							putStrLn "Error input ls command"
+							menu dataMaster
+					else do
+						putStrLn "Error input ls command"
+						menu dataMaster
+
+advanceToPrintDetails :: [String] -> Directory -> IO()
+advanceToPrintDetails path dir =
+	if length(path) == 1 then printDirectoryDataDetails (path!!0) (directories(dir)) else
+	advanceToPrintDetailsAux (path) (dir) (directories(dir))
+
+advanceToPrintDetailsAux :: [String] -> Directory -> [Directory] -> IO()
+advanceToPrintDetailsAux path directoryFather dirs =
+	if path!!0 == nameDirectory(dirs!!0) then advanceToPrintDetails (tail path) (dirs!!0)
+		else advanceToPrintDetailsAux (path) (directoryFather) (tail dirs)
+
+printDirectoryDataDetails :: String -> [Directory] -> IO()
+printDirectoryDataDetails name dirs =
+	if name == nameDirectory(dirs!!0) 
+		then do
+			lsPrintDetailsDir (directories(dirs!!0))
+			lsPrintDetailsFiles (files(dirs!!0))
+			lsPrintDetailsSymbolics (symbolics(dirs!!0))
+			putStrLn ""
+		else printDirectoryDataDetails (name) (tail dirs)
+
+printRootDetails :: DataMaster -> IO()
+printRootDetails dataMaster = do
+	lsPrintDetailsDir (directories(getRootDirectory dataMaster))
+	lsPrintDetailsFiles (files(getRootDirectory dataMaster))
+	lsPrintDetailsSymbolics (symbolics(getRootDirectory dataMaster))
+	putStrLn ""
+
+lsPrintDetailsDir :: [Directory] -> IO()
+lsPrintDetailsDir dirs =
+	if (dirs == []) 
+		then do
+			putStr ""
+	else do
+		putStrLn ("d "++(userDirectory(dirs!!0))++":"++(groupDirectory(dirs!!0))++"    "++(creationDateDirectory(dirs!!0))++"    "++(creationTimeDirectory(dirs!!0))++"    "++(nameDirectory(dirs!!0)))
+		lsPrintDetailsDir (tail dirs)
+
+lsPrintDetailsFiles :: [File] -> IO()
+lsPrintDetailsFiles dirs =
+	if (dirs == []) 
+		then do
+			putStr ""
+	else do
+		putStrLn ("- "++(userFile(dirs!!0))++":"++(groupFile(dirs!!0))++"    "++(creationDateFile(dirs!!0))++"    "++(creationTimeFile(dirs!!0))++"    "++(nameFile(dirs!!0)))
+		lsPrintDetailsFiles (tail dirs)
+
+lsPrintDetailsSymbolics :: [SymbolicLink] -> IO()
+lsPrintDetailsSymbolics dirs =
+	if (dirs == []) 
+		then do
+			putStr ""
+	else do
+		putStrLn ("l "++(userSymbolic(dirs!!0))++":"++(groupSymbolic(dirs!!0))++"    "++(creationDateSymbolic(dirs!!0))++"    "++(creationTimeSymbolic(dirs!!0))++"    "++(nameSymbolic(dirs!!0))++" -> "++(pathToLink(dirs!!0)))
+		lsPrintDetailsSymbolics (tail dirs)
+
+advanceToPrint :: [String] -> Directory -> IO()
+advanceToPrint path dir =
+	if length(path) == 1 then printDirectoryData (path!!0) (directories(dir)) else
+	advanceToPrintAux (path) (dir) (directories(dir))
+
+advanceToPrintAux :: [String] -> Directory -> [Directory] -> IO()
+advanceToPrintAux path directoryFather dirs =
+	if path!!0 == nameDirectory(dirs!!0) then advanceToPrint (tail path) (dirs!!0)
+		else advanceToPrintAux (path) (directoryFather) (tail dirs)
+
+printDirectoryData :: String -> [Directory] -> IO()
+printDirectoryData name dirs =
+	if name == nameDirectory(dirs!!0) 
+		then do
+			lsPrintDirectories (directories(dirs!!0))
+			lsPrintFiles (files(dirs!!0))
+			lsPrintSymbolics (symbolics(dirs!!0))
+			putStrLn ""
+		else printDirectoryData (name) (tail dirs)
+
+lsPrintDirectories :: [Directory] -> IO()
+lsPrintDirectories dirs =
+	if (dirs == []) 
+		then do
+			putStr ""
+	else do
+		putStr ((nameDirectory(dirs!!0))++" ")
+		lsPrintDirectories (tail dirs)
+
+lsPrintFiles :: [File] -> IO()
+lsPrintFiles dirs =
+	if (dirs == []) 
+		then do
+			putStr ""
+	else do
+		putStr ((nameFile(dirs!!0))++" ")
+		lsPrintFiles (tail dirs)
+
+lsPrintSymbolics :: [SymbolicLink] -> IO()
+lsPrintSymbolics dirs =
+	if (dirs == []) 
+		then do
+			putStr ""
+	else do
+		putStr ((nameSymbolic(dirs!!0))++" ")
+		lsPrintSymbolics (tail dirs)
+
+-- Files and Directories ##########################
+
+-- Symbolic Links #################################
+
+newSymbolinLink :: String -> String -> String -> SymbolicLink
+newSymbolinLink name path pathToLink =
+	SymbolicLink { nameSymbolic = name
+                 , pathSymbolic = path
+                 , pathToLink = pathToLink
+                 , creationDateSymbolic = "date"
+                 , creationTimeSymbolic = "time"
+                 , userSymbolic = "root"
+                 , groupSymbolic = "root" }	
 
 
--- | Check some requirements about the device's size
-sizeDev :: String -> Bool
-sizeDev dev = 
-    (if (init(dev) /= "0") && (verifyNumber(init(dev)))
-    then ( if ( (last(dev) == 'G') || (last(dev) == 'M') )
-           then True 
-           else False)
-    else False) 
+lnCommand :: [String] -> DataMaster -> IO()
+lnCommand command dataMaster =
+	if length(command) == 4 
+		then if(command!!1 == "-s") 
+			then if(verifyDirsExist (createPath (command!!3) ("") ([])) (getRootDirectory dataMaster)) 
+					then if((fileExist (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster)) || (existDirectory (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster)))
+						then if(isADirectory (createPath (command!!2) ("") ([])) (getRootDirectory dataMaster))
+							then updateDirectoriesDataMaster (createSymbolicLinkDir (createPath (command!!3) ("") ([])) (command!!3) (command!!2) (getRootDirectory dataMaster)) (dataMaster)
+							else updateDirectoriesDataMaster (createSymbolicLinkFile (createPath (command!!3) ("") ([])) (command!!3) (command!!2) (getRootDirectory dataMaster)) (dataMaster)
+					else do
+						putStrLn "Error"
+						menu dataMaster
+				else do
+					putStrLn "Error"
+					menu dataMaster
+			else do
+				putStrLn "Error"
+				menu dataMaster
+		else do
+			putStrLn "Error"
+			menu dataMaster
 
--- | Check some requirements about the device path
-isCorrectPath :: [Char] -> Bool
-isCorrectPath path = 
-	(if (take 5(path) == "/dev/") 
-	 then ( if (null (drop 5(path)) )
-	         then False
-	         else True ) 
-	 else False)
+createSymbolicLinkFile :: [String] -> String -> String -> Directory -> Directory
+createSymbolicLinkFile path stringPath pathToLink dir =
+	if length(path) == 1 then createSymbolic (path!!0) (stringPath) (pathToLink) (dir)
+	else createSymbolicLinkFileAux (path) (stringPath) (pathToLink) (dir) (directories(dir)) ([]) 
 
--- | Check if the command is correct 
-verifyCommand :: [String] -> Bool
-verifyCommand cmd = 
-	if( cmd!!0 == "createdev" && cmd!!1 == "-s" ) 
-		then( if( sizeDev(cmd!!2) ) 
-			then( if(isCorrectPath(last(cmd)) ) 
-				then(True) else(False)) else(False)) else(False)
+createSymbolicLinkFileAux :: [String] -> String -> String -> Directory -> [Directory] -> [Directory] -> Directory
+createSymbolicLinkFileAux path stringPath pathToLink directoryFather dirs answer =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+		             , pathDirectory = pathDirectory(directoryFather)
+		             , creationDateDirectory = creationDateDirectory(directoryFather)
+		             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+		             , userDirectory = userDirectory(directoryFather)
+		             , groupDirectory = groupDirectory(directoryFather)
+		         	 , directories = answer
+		         	 , files = files(directoryFather)
+		         	 , symbolics = symbolics(directoryFather)}
+		else if path!!0 == nameDirectory(dirs!!0)
+			then createSymbolicLinkFileAux (path) (stringPath) (pathToLink) (directoryFather) (tail dirs) (answer++[createSymbolicLinkFile (tail path) (stringPath) (pathToLink) (dirs!!0)])
+			else createSymbolicLinkFileAux (path) (stringPath) (pathToLink) (directoryFather) (tail dirs) (answer++[dirs!!0]) 
 
+createSymbolicLinkDir :: [String] -> String -> String -> Directory -> Directory
+createSymbolicLinkDir path stringPath pathToLink dir =
+	if length(path) == 1 then createSymbolic (path!!0) (stringPath) (pathToLink) (dir)
+	else createSymbolicLinkDirAux (path) (stringPath) (pathToLink) (dir) (directories(dir)) ([]) 
 
-storeDeviceData :: [String] -> [] -> Bool 
-storeDeviceData cmd dataList = 
-	(if (length (cmd) == 2) 
-	 then (devDataToStorage dataList)
- 	 else (storeDeviceData (init(cmd)) (dataList ++ last(cmd)))) )
+createSymbolicLinkDirAux :: [String] -> String -> String -> Directory -> [Directory] -> [Directory] -> Directory
+createSymbolicLinkDirAux path stringPath pathToLink directoryFather dirs answer =
+	if dirs == []
+		then Directory {nameDirectory=nameDirectory(directoryFather)
+		             , pathDirectory = pathDirectory(directoryFather)
+		             , creationDateDirectory = creationDateDirectory(directoryFather)
+		             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+		             , userDirectory = userDirectory(directoryFather)
+		             , groupDirectory = groupDirectory(directoryFather)
+		         	 , directories = answer
+		         	 , files = files(directoryFather)
+		         	 , symbolics = symbolics(directoryFather)}
+		else if path!!0 == nameDirectory(dirs!!0)
+			then createSymbolicLinkDirAux (path) (stringPath) (pathToLink) (directoryFather) (tail dirs) (answer++[createSymbolicLinkDir (tail path) (stringPath) (pathToLink) (dirs!!0)])
+			else createSymbolicLinkDirAux (path) (stringPath) (pathToLink) (directoryFather) (tail dirs) (answer++[dirs!!0]) 
 
+createSymbolic :: String -> String -> String -> Directory -> Directory
+createSymbolic name path pathToLink directoryFather =
+	Directory {nameDirectory=nameDirectory(directoryFather)
+             , pathDirectory = pathDirectory(directoryFather)
+             , creationDateDirectory = creationDateDirectory(directoryFather)
+             , creationTimeDirectory = creationTimeDirectory(directoryFather)
+             , userDirectory = userDirectory(directoryFather)
+             , groupDirectory = groupDirectory(directoryFather)
+         	 , directories = directories(directoryFather)
+         	 , files = files(directoryFather)
+         	 , symbolics = symbolics(directoryFather)++[newSymbolinLink (name) (path) (pathToLink)]}
 
--- | Create storage devices
-createStorageDevice :: [String] -> Bool
-createStorageDevice cmd =
-	(if (length(cmd) == 4)
-	 then ( if ( verifyCommand(cmd) ) 
-	       then (storeDeviceData cmd [])
-	  	   else	False )
-	 else False)
-
--- | Print the device list
-printDevList :: [String] -> Bool
-printDevList cmd = 
-	  if(length(cmd) == 2) 
-	  then ( (if (cmd!!1 == "-l")
-	  	    then True
-	  	    else False) )
-	  -- | PRINT
-	  else (False)
-
--- | Remove a device 
-deleteDevice :: [String] -> Bool 
-deleteDevice cmd = 
-	if(length(cmd) == 2) 
-	then ( if( (take 5(cmd!!1)) == "/dev/" &&
-	                  (drop 5(cmd!!1)) /= "")
-	       then True 
-	       else False ) 
-	else(False)   -}
-
--- Storage Devices ##################################
-
--- File Systems ##################################
-
--- | verify if the fs path is correct
-{-verifyPath :: String -> Bool
-verifyPath name = 
-	 if ( (((take 7(name)) == "vgName/") &&
-	                 ((drop 7(name)) /= "") ) )
-	 then True 
-	 else ( (if(null name)
-	         then (False) 
-	         else (True)) ) 
-
--- | Create a new filesystem
-createFileSystem :: [String] -> Bool
-createFileSystem cmd = 
-	(if (length (cmd) == 4)
-	 then ( (if (cmd!!1 == "-t")
-	         then ( (if( (cmd!!2 == "ext2") || (cmd!!2 == "ext3")
-	                                  ||(cmd!!2 == "ext4") ) 
-	                 then( (if( (take 5(cmd!!3)) == "/dev/" ) 
-	 	     	            then( verifyPath (drop 5(cmd!!3)) ) 
-	 	     	            else False) )  
-	 	             else False) ) 
-	         else False) ) 
-	 else False)
-
-
--- | create the mount directory
-createMountPoint :: [String] -> Bool
-createMountPoint cmd =
-	(if(length (cmd) == 3) 
-	 then( (if( (cmd!!1 == "-p") && (cmd!!2 == "/mount/point")) 
-	 	    then( True ) 
-	 	    else(False))  ) 
-	 else(False) )
-
--- | check if the path components exist
-checkPathStatus :: String -> Bool
-checkPathStatus path = 
-	(if (take 5(path)) == "/dev/" )
-	 then ( (if()
-	 	     then()
-	 	     else()) )
-	 else(False))
-
-
--- | mount a file system
-mountFileSystem :: [String] -> Bool
-mountFileSystem cmd = 
-	(if (length(cmd) == 3)
-	then ( (if( cmd!!2 == "/mount/point")
-		    then(checkPathStatus (cmd!!1))
-		    else(False)) )
-	else False)
-
--- | print the file systems mounted
-printMountList :: [String] -> Bool
-printMountList cmd = 
-
-
-
--- | other way to print the fs list
-alternatePrintMount :: [String] -> Bool
-alternatePrintMount cmd = 
-	--| access to the devices data structure
-
-
-
--- | print the specific skills about some file system mounted
-specificAlternatePrintMount :: [String] -> Bool
-specificAlternatePrintMount cmd = 
-	(if( (cmd!!1 == "-h") && (cmd!!2 == "/mount/point") )
-	then(True)
-	else(False))
-	-- | find the specific dev and show your characteristics
-
-
-umountFileSystem :: [String] -> Bool
-umountFileSystem cmd = 
-	(if(length(cmd) == 2)
-	 then( (if( cmd!!1 == "/mount/point")
-	 	    then(True)
-	 	    else(False)) )
-	 else(False))  -}
-
--- File Systems ##################################
-
--- Symbolic Links ##################################
-
--- | Manage the command according to the symb link operation
-{-  manageSymbolicLink :: [String] -> Bool
-manageSymbolicLink cmd = 
-	if (cmd!!1 == "-s")
-		then()
-		else()  -}
-
--- Symbolic Links ##################################
-
-getUsers :: DataMaster -> [User]
-getUsers dataMaster = users dataMaster
-
-getGroups :: DataMaster -> [Group]
-getGroups dataMaster = groups dataMaster
-
-getStgDev :: DataMaster -> [StorageDevice]
-getStgDev dataMaster = stgdevices dataMaster
-
-getFileSys :: DataMaster -> [FileSystem]
-getFileSys dataMaster = filesys dataMaster
-
-getVolGr :: DataMaster -> [VolumeGroup]
-getVolGr dataMaster = volgroup dataMaster
-
-getFileDir :: DataMaster -> [FilesAndDirectories]
-getFileDir dataMaster = fileanddir dataMaster
+-- Symbolic Links #################################
 
 main :: IO()
-main = menu DataMaster {users=[], groups=[], stgdevices=[], filesys=[], volgroup=[], fileanddir=[]}
+main = menuDefault DataMaster {users=[]
+						, groups=[defaultRootGroup]
+						, stgdevices=[]
+						, filesys=[]
+						, volgroup=[]
+						, fileanddir=(defaultDirectory,defaultDirectory)}
 
 -- Main ------------------------------------------
 menu :: DataMaster -> IO()
 menu dataMaster = do
-	putStr "# "
+	putStr ("# "++nameDirectory(snd(getFileDir(dataMaster)))++" >> ")
 	input <- getLine
 	if null input
 		then
@@ -796,80 +1665,46 @@ menu dataMaster = do
 			then do
 				groupDel command dataMaster
 		------------------------------------------
-		-- NO FUNCIONA BIEN! COMPROBAR UNA VEZ EXISTAN LAS LISTAS
 		else if (head(command) == "usermod")
 			then do
 				userModification command dataMaster
 		------------------------------------------
-		else if (head(command) == "pvcreate")
+		else if (head(command) == "mkdir")
 			then do
-				if (pvcreateFunction command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				createDirectory command dataMaster
 		------------------------------------------
-		else if (head(command) == "vgcreate")
+		else if (head(command) == "touch")
 			then do
-				if (vgcreateFunction command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				touchCommand command dataMaster
 		------------------------------------------
-		else if (head(command) == "vgreduce")
+		else if (head(command) == "ls")
 			then do
-				if (vgreduceFunction command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				lsCommand command dataMaster
 		------------------------------------------
-		else if (head(command) == "vgextend")
+		else if (head(command) == "cd")
 			then do
-				if (vgextendFunction command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				cdCommand command dataMaster
 		------------------------------------------
-		else if (head(command) == "vgdisplay")
+		else if (head(command) == "echo")
 			then do
-				if (vgDisplay command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				echoCommand command dataMaster
 		------------------------------------------
-		else if (head(command) == "vgs")
+		else if (head(command) == "rmdir")
 			then do
-				if (vgDisplay command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				rmdirCommand command dataMaster
 		------------------------------------------
-		else if (head(command) == "vgremove")
+		else if (head(command) == "rm")
 			then do
-				if (vgRemove command)
-					then do
-						putStrLn $ "OK"
-						menu dataMaster
-					else do
-						putStrLn $ "Error"
-						menu dataMaster
+				rmCommand command dataMaster
+		------------------------------------------
+		else if (head(command) == "chown")
+			then do
+				chownCommand command dataMaster
+		------------------------------------------
+		else if (head(command) == "ln")
+			then do
+				lnCommand command dataMaster
+		------------------------------------------
 		------------------------------------------
 		else do
 		putStrLn $ "Error"
